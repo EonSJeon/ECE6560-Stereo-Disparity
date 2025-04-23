@@ -1,206 +1,156 @@
-% -------------------------------------------------------------------------
-% Main Script
-% -------------------------------------------------------------------------
 clc; clear; close all;
 
-IL = im2double(imread('./tsukuba/scene1.row3.col1.ppm'));
-IR = im2double(imread('./tsukuba/scene1.row3.col5.ppm'));
-% IL = im2double(imread('./test1.png'));
-% IR = im2double(imread('./test2.png'));
+I_paths = { ...
+    './tsukuba/scene1.row3.col1.ppm', ...
+    './tsukuba/scene1.row3.col2.ppm', ...
+    './tsukuba/scene1.row3.col3.ppm', ...
+    './tsukuba/scene1.row3.col4.ppm', ...
+    './tsukuba/scene1.row3.col5.ppm'  ...
+};
 
+% Experiment settings
+lambdas     = [0.95, 0.9, 0.6, 0.3];   
+kernelSizes = [5, 3, 1];               
+baseDir     = fullfile(pwd, 'results');
+if ~exist(baseDir, 'dir'), mkdir(baseDir); end
 
-if size(IL,3) == 3, IL = rgb2gray(IL); end
-if size(IR,3) == 3, IR = rgb2gray(IR); end
+% Define pairs to run 
+pairs = [3 5; 1 5; 4 5];  
 
-% Parameters
-lambda       = 0.8;    
-numIters     = 150000;         
+for p = 1:size(pairs,1)
+    leftIdx  = pairs(p,1);
+    rightIdx = pairs(p,2);
+    IL_path  = I_paths{leftIdx};
+    IR_path  = I_paths{rightIdx};
+    
+    % create subfolder for this pair
+    subfolder = fullfile(baseDir, sprintf('L%02d_R%02d', leftIdx, rightIdx));
+    if ~exist(subfolder, 'dir'), mkdir(subfolder); end
 
-[d_est, energyHistory] = depthMap(IL, IR, lambda, numIters);
+    % loop over kernels and lambdas
+    for k = kernelSizes
+        kernel = ones(1, k);
+        for lam = lambdas
+            % run disparity experiment
+            exp = runExp(IL_path, IR_path, lam, kernel);
 
-% Estimated disparity
-figure; 
-imshow(d_est, []);
-title('Disparity Map');
-colormap jet; colorbar;
+            % save experiment struct
+            fname = sprintf('exp_lambda%.2f_k%dx1.mat', exp.lambda, k);
+            save(fullfile(subfolder, fname), 'exp');
 
-% Plot the loss history
-figure;
-plot(energyHistory, 'LineWidth', 2);
-xlabel('Iteration');  ylabel('Energy');
-title('Energy Loss History');
-grid on;
-
-% Approximate depth as 1 / (disparity + eps)
-depthMap_approx = 1./(d_est + 0.01);
-figure;
-imshow(depthMap_approx, []);
-title('Approx. Depth = 1/(Disparity)');
-colormap jet; colorbar;
-
-function [d, energyHistory] = depthMap(IL, IR, lambda, numIters)
-    dt_cfl = 0.25;
-    dx=1;
-
-    IL = double(IL);
-    IR = double(IR);
-
-    [h, w] = size(IL);
-
-    % Initialize disparity
-    d = ones(h, w)*0;
-    % d =15;
-    % size(d)
-
-    % Central difference in x
-    IxR = backwardDiffX(IR);
-
-    % Make coordinate grid
-    [X, Y] = meshgrid(1:w, 1:h);
-
-    % Preallocate energy history
-    energyHistory = zeros(numIters,1);
-
-    % Compute initial energy
-    init_mismatch = IL-IR;
-    energyHistory(1) = computeEnergy(d, init_mismatch, lambda);
-
-    % ------------- Gradient Descent Loop -------------
-    for iter = 2:numIters
-        % --- Data Term Gradient (masked) ---
-        mask = (X - d)>=1;       
-        IR_warp  = interp2(IR, X - d, Y, 'linear', 0);
-        IxR_warp = interp2(IxR, X - d, Y, 'linear', 0);
-
-        mismatch = (IL - IR_warp).*mask;
-        
-        % figure;
-        % subplot(3,1,1);
-        % imshow(IL);
-        % subplot(3,1,2);
-        % imshow(IR);
-        % subplot(3,1,3);
-        % imshow(IR_warp);
-        % 
-        % figure;
-        % imshow(mask);
-
-        grad_data = -lambda * mismatch .* IxR_warp .* mask;
-
-        % figure;
-        % imshow(grad_data~=0);
-
-        % --- Smoothness Gradient  ---
-        % size(d)
-        lap_d = laplacianNeumann(d);
-
-        % figure;
-        % imshow(lap_d);
-        grad_smooth = (1 - lambda) .* lap_d;
-
-        % --- Combine & Update (unconstrained) ---
-        grad_total = grad_data + grad_smooth;
-        grad_max = max(abs(grad_total(:)));
-        stepSize = min(dt_cfl, 0.5*dx/grad_max);
-        % update = min(max(dt_cfl *grad_total,-dx),dx);
-        d = d + grad_total * stepSize;
-        % d = max(d,0);
-
-        % --- Compute new energy ---
-        energyHistory(iter) = computeEnergy(d, mismatch, lambda);
-
-        % --- Optional intermediate plots every 10000 iters ---
-        if mod(iter,5000)==0
-            h_iter = figure;
-            subplot(4,1,1);
-            imshow(d, []);
-            title(sprintf('Disparity at iter %d', iter));
-            colormap jet; colorbar;
-            subplot(4,1,2);
-            imshow(IL, []);
-            title('IL reference');
-            subplot(4,1,3);
-            imshow(IR, []);
-            title('IR reference');
-            subplot(4,1,4);
-            imshow(IR_warp);
-            title('IR warp')
-            saveas(h_iter, sprintf('iter_%05d.png', iter));
-            close(h_iter);
-
-            % figure;
-            % imshow(mismatch);
-            % title('Mismatch');
-            % 
-            % figure;
-            % imshow(grad_data);
-            % title('grad data')
-            % ;
-            
-        end
-
-        % Print progress
-        if mod(iter, 1000) == 0
-            fprintf('Iteration %d / %d, E = %.6f\n', iter, numIters, energyHistory(iter));
+            % plot and save results into subfolder
+            plotDisparityResults(exp, subfolder, true);
         end
     end
 end
 
 
-function Fx = forwardDiffX(I)
-%FORWARDDIFFX Computes forward difference in the x-direction
-%   Fx(i,j) = I(i,j+1) - I(i,j), except for the last column which is replicated.
+function exp = runExp(IL_path, IR_path, lambda, kernel)
+    disp('==== Experiment Start ====')
+    fprintf('IL path: %s\n',IL_path);
+    fprintf('IR path: %s\n',IR_path);
+    fprintf('lambda: %f\n', lambda);
+    fprintf('kernel:\n');
+    disp(kernel);
 
-    [rows, cols] = size(I);
-    Fx = zeros(rows, cols);
-    % For each row, difference in x
-    Fx(:,1:end-1) = I(:,2:end) - I(:,1:end-1);
-    % For the last column, replicate or set to 0
-    Fx(:,end) = Fx(:,end-1);  
+    % Default kernel if not provided
+    if nargin < 4 || isempty(kernel)
+        kernel = ones(1,3);
+    end
+
+    % Read and normalize
+    IL = im2double(imread(IL_path));
+    IR = im2double(imread(IR_path));
+
+    % Dimensions and grid
+    [h,w,~] = size(IL);
+    [X,Y]   = meshgrid(1:w, 1:h);
+
+    % Run disparity estimation
+    disp('======= GrayScale Mode ========')
+    [d_gray, E_gray]   = depthMapPatch(IL, IR, lambda, 'grayscale', kernel);
+    disp('======= Color Mode ========')
+    [d_color, E_color] = depthMapPatch(IL, IR, lambda, 'color',     kernel);
+
+    % Compute final warped images
+    IR_warp_gray = interp2(rgb2gray(IR), X - d_gray, Y, 'linear', 0);
+    IR_warp_color = zeros(h,w,3);
+    for c = 1:3
+        IR_warp_color(:,:,c) = interp2(IR(:,:,c), X - d_color, Y, 'linear', 0);
+    end
+
+    % Package results in struct
+    exp.IL_path       = IL_path;
+    exp.IR_path       = IR_path;
+    exp.lambda        = lambda;
+    exp.kernel        = kernel;
+    exp.d_gray        = d_gray;
+    exp.d_color       = d_color;
+    exp.E_gray        = E_gray;
+    exp.E_color       = E_color;
+    exp.IR_warp_gray  = IR_warp_gray;
+    exp.IR_warp_color = IR_warp_color;
+    disp('==== Experiment End ====')
 end
 
-function Bx = backwardDiffX(I)
-%BACKWARDDIFFX  Computes backward difference in x-direction
-%   Bx(i,j) = I(i,j) - I(i,j-1), with the first column replicated.
-    [rows, cols] = size(I);
-    Bx = zeros(rows, cols);
-    % For each row, backward difference in x
-    Bx(:,2:cols) = I(:,2:cols) - I(:,1:cols-1);
-    % For the first column, replicate the next value (or set to zero)
-    Bx(:,1) = Bx(:,2);
-end
+function plotDisparityResults(exp, outputDir, save)
+    if nargin < 2 || isempty(outputDir)
+        outputDir = pwd;
+    end
+    % Read left image for reference
+    IL = im2double(imread(exp.IL_path));
 
+    % Unpack results
+    d_gray        = exp.d_gray;
+    d_color       = exp.d_color;
+    IR_warp_gray  = exp.IR_warp_gray;
+    IR_warp_color = exp.IR_warp_color;
+    E_gray        = exp.E_gray;
+    E_color       = exp.E_color;
 
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-% Function: laplacianNeumann
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-function L = laplacianNeumann(U)
-%LAPLACIANNEUMANN Computes the 2D Laplacian of U using a 5-point stencil
-% with replicated boundaries to approximate Neumann boundary conditions.
+    %% Figure 1: Disparity & Warps
+    f1 = figure('Name','Disparity & Warps','NumberTitle','off','Position',[100 100 800 600]);
+    subplot(3,2,1);
+    imshow(d_color, []); title('Color Disparity'); colormap jet; colorbar;
+    subplot(3,2,3);
+    imshow(IL, []); title('Color IL (Reference)');
+    subplot(3,2,5);
+    imshow(IR_warp_color, []); title('Color IR (Warped)');
+    subplot(3,2,2);
+    imshow(d_gray, []); title('Grayscale Disparity'); colormap jet; colorbar;
+    subplot(3,2,4);
+    imshow(rgb2gray(IL), []); title('Grayscale IL (Reference)');
+    subplot(3,2,6);
+    imshow(IR_warp_gray, []); title('Grayscale IR (Warped)');
+    drawnow;
 
-    [h, w] = size(U);
-
-    % Replicate boundaries
-    U_up    = [U(1,:);    U(1:h-1,:)];   
-    U_down  = [U(2:h,:); U(h,:)];     
-    U_left  = [U(:,1),   U(:,1:w-1)];    
-    U_right = [U(:,2:w), U(:,w)];
-
-    % size(U_up)
-
-    % Compute the Laplacian
-    L = (U_up + U_down + U_left + U_right) - 4 * U;
-    % size(L)
-end
-
-function E_val = computeEnergy(d, mismatch, lambda)
-%COMPUTEENERGYDATAMASKED
-% E(d) =  ∑ [ Sel(x)*(λ/2*(IL - IR(x+d))^2 ] + ∑ [ (1-λ)/2*||∇d||^2 ].
+    % Save figure if requested
+    if save
+        try
+        saveas(f1, fullfile(outputDir, sprintf('DisparityAndWarps_lambda_%.2f.png', exp.lambda)));
+        catch
+            warning('Could not save Disparity & Warps figure.');
+        end
+    end
     
-    dataTerm = 0.5 * lambda * sum( mismatch(:).^2 );
+    %% Figure 2: Energy Loss History
+    f2 = figure('Name','Energy Loss History','NumberTitle','off','Position',[200 200 600 400]);
+    plot(E_color, 'LineWidth',2); hold on;
+    plot(E_gray,  '--','LineWidth',2); hold off;
+    xlabel('Iteration'); ylabel('Energy');
+    title('Energy Loss: Color vs. Grayscale');
+    legend({"Color","Grayscale"}, 'Location','northeast');
+    grid on;
+    drawnow;
 
-    [dx, dy] = gradient(d);
-    smoothTerm = 0.5 * (1 - lambda) * sum(dx(:).^2 + dy(:).^2);
-
-    E_val = dataTerm + smoothTerm;
+    % Save energy plot
+    if save
+        try
+            saveas(f2, fullfile(outputDir, sprintf('EnergyLoss_lambda_%.2f.png', exp.lambda)));
+        catch
+            warning('Could not save Energy Loss figure.');
+        end
+    end
+    
 end
+

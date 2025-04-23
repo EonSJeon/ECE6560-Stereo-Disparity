@@ -9,7 +9,7 @@ IR = im2double(imread('./tsukuba/scene1.row3.col5.ppm'));
 % IR = im2double(imread('./test2.png'));
 
 % Parameters
-lambda       = 0.8;    
+lambda       = 0.3;    
 numIters     = 150000;         
 
 [d_est, energyHistory] = depthMapColor(IL, IR, lambda, numIters);

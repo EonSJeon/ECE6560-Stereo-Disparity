@@ -3,99 +3,101 @@
 % -------------------------------------------------------------------------
 clc; clear; close all;
 
-IL = im2double(imread('./tsukuba/scene1.row3.col4.ppm'));
+IL = im2double(imread('./tsukuba/scene1.row3.col3.ppm'));
 IR = im2double(imread('./tsukuba/scene1.row3.col5.ppm'));
-% IL = im2double(imread('./test1.png'));
-% IR = im2double(imread('./test2.png'));
 
+% keep as RGB
 % Parameters
-lambda       = 0.8;    
-numIters     = 150000;         
+lambda     = 0.8;
+numIters   = 150000;
 
-[d_est, energyHistory] = depthMapColor(IL, IR, lambda, numIters);
+[d_est, energyHistory] = depthMapColorPatch(IL, IR, lambda, numIters);
 
-% Estimated disparity
-figure; 
-imshow(d_est, []);
-title('Disparity Map');
-colormap jet; colorbar;
-
-% Plot the loss history
-figure;
-plot(energyHistory, 'LineWidth', 2);
-xlabel('Iteration');  ylabel('Energy');
-title('Energy Loss History');
-grid on;
-
-% Approximate depth as 1 / (disparity + eps)
+% Show results
+figure; imshow(d_est,[]); title('Disparity Map'); colormap jet; colorbar;
+figure; plot(energyHistory,'LineWidth',2);
+xlabel('Iteration'); ylabel('Energy'); title('Energy Loss History'); grid on;
 depthMap_approx = 1./(d_est + 0.01);
-figure;
-imshow(depthMap_approx, []);
-title('Approx. Depth = 1/(Disparity)');
-colormap jet; colorbar;
+figure; imshow(depthMap_approx,[]); title('Approx. Depth'); colormap jet; colorbar;
 
 
 
-function [d, energyHistory] = depthMapColor(IL, IR, lambda, numIters)
-    dt_cfl=0.25;
-    dx=1;
-    
-    % IL, IR: H x W x 3 color images
+function [d, energyHistory] = depthMapColorPatch(IL, IR, lambda, numIters)
+    % patch radius = 1 => 3x3 neighborhood
+    kernel = ones(1,5);
+    dt_cfl = 0.25;
+    dx     = 1;
+
+    alpha = 4;
+    alpha_th =1e-3;
+
     [h, w, ~] = size(IL);
-
-    % Initialize disparity
     d = zeros(h, w);
-
-    % Precompute derivative of IR in x for each channel
-    IxR = zeros(h, w, 3);
-    for c = 1:3
-        IxR(:,:,c) = backwardDiffX(IR(:,:,c));  % or central difference
-    end
-
-    [X, Y] = meshgrid(1:w, 1:h);
     energyHistory = zeros(numIters,1);
 
-    % PDE loop
-    for iter = 1:numIters
-    
-        % 1) Warp IR each channel
-        IR_warp = zeros(h, w, 3);
-        IxR_warp = zeros(h, w, 3);
+    % Precompute IxR for each channel (here backward diff; can use gradient)
+    IxR = zeros(h,w,3);
+    for c=1:3
+        IxR(:,:,c) = backwardDiffX(IR(:,:,c));
+    end
 
-        mask = (X - d)>=1;    
-        for c = 1:3
-            IR_warp(:,:,c)  = interp2(IR(:,:,c), X - d, Y, 'linear', 0);
+    [X,Y] = meshgrid(1:w,1:h);
+
+    energyHistory(1) = computeInitEnergy(IL, IR, lambda);
+    oldSampledE = energyHistory(1);
+
+    for iter=2:numIters
+        % warp IR and IxR
+        IR_warp  = zeros(h,w,3);
+        IxR_warp = zeros(h,w,3);
+        mask = (X - d) >= 1;
+        for c=1:3
+            IR_warp(:,:,c)  = interp2(IR(:,:,c),  X - d, Y, 'linear', 0);
             IxR_warp(:,:,c) = interp2(IxR(:,:,c), X - d, Y, 'linear', 0);
         end
 
-        % 2) Mismatch for each channel
-        mismatchR = IL(:,:,1) - IR_warp(:,:,1).*mask;
-        mismatchG = IL(:,:,2) - IR_warp(:,:,2).*mask;
-        mismatchB = IL(:,:,3) - IR_warp(:,:,3).*mask;
+        % mismatches and gradient‐products per channel
+        mismatchR = (IL(:,:,1) - IR_warp(:,:,1)).*mask;
+        mismatchG = (IL(:,:,2) - IR_warp(:,:,2)).*mask;
+        mismatchB = (IL(:,:,3) - IR_warp(:,:,3)).*mask;
 
-        % sum partial derivatives => grad_data
-        grad_dataR = mismatchR .* IxR_warp(:,:,1).*mask;
-        grad_dataG = mismatchG .* IxR_warp(:,:,2).*mask;
-        grad_dataB = mismatchB .* IxR_warp(:,:,3).*mask;
+        gR = mismatchR .* IxR_warp(:,:,1);
+        gG = mismatchG .* IxR_warp(:,:,2);
+        gB = mismatchB .* IxR_warp(:,:,3);
 
-        grad_data = - lambda * ( grad_dataR + grad_dataG + grad_dataB ).*mask;
+        % patch‐based sum of mismatch^2 => data energy
+        sR = conv2(mismatchR.^2, kernel, 'same');
+        sG = conv2(mismatchG.^2, kernel, 'same');
+        sB = conv2(mismatchB.^2, kernel, 'same');
 
-        % 3) Smoothness term (e.g. Neumann Laplacian)
-        lap_d      = laplacianNeumann(d);
-        grad_smooth= (1 - lambda) * lap_d;
+        % patch‐based sum of gradients => data gradient
+        pR = conv2(gR, kernel, 'same');
+        pG = conv2(gG, kernel, 'same');
+        pB = conv2(gB, kernel, 'same');
 
+        dataTerm    = 0.5*lambda * sum(sR(:)+sG(:)+sB(:));
+        grad_data   = - lambda * (pR + pG + pB);
+
+        % smoothness term
+        lap_d       = laplacianNeumann(d);
+        smoothTerm  = 0.5*(1-lambda)*sum( (gradient(d)).^2 ,'all');
+        grad_smooth = (1-lambda) * lap_d;
+
+        % store energy
+        energyHistory(iter) = dataTerm + smoothTerm;
+
+        % PDE step
         grad_total = grad_data + grad_smooth;
+        gmax       = max(abs(grad_total(:)));
+        dt         = min(dt_cfl, dx / max(gmax, eps));
+        d          = d + dt * grad_total;
 
-        % time-step
-        grad_max = max(abs(grad_total(:)));
-        stepSize = min(dt_cfl, 0.25*dx/grad_max);
-        d = d + grad_total * stepSize;
+        % enforce d>=0
+        d = max(d,0);
         
-        % --- Compute new energy ---
-        energyHistory(iter) = computeColorEnergy(d, mismatchR,mismatchG, mismatchB, lambda);
 
-        % --- Optional intermediate plots every 10000 iters ---
-        if mod(iter,5000)==0
+
+        if mod(iter,1000)==0
             h_iter = figure;
             subplot(4,1,1);
             imshow(d, []);
@@ -123,51 +125,66 @@ function [d, energyHistory] = depthMapColor(IL, IR, lambda, numIters)
             % ;
             
         end
+        
+        if mod(iter,50)==0
+            if energyHistory(iter)>oldSampledE
+                alpha = alpha/4;
+                fprintf("alpha has been changed to %f at iter %d\n", alpha, iter);
+            end
+            if alpha < alpha_th
+                return;
+            end
+            oldSampledE = energyHistory(iter);
+        end
 
-        % Print progress
-        if mod(iter, 1000) == 0
-            fprintf('Iteration %d / %d, E = %.6f\n', iter, numIters, energyHistory(iter));
+        if mod(iter,1000)==0
+            fprintf("Iter %d/%d, E=%.6f\n", iter,numIters,energyHistory(iter));
         end
     end
 end
 
+
 function Bx = backwardDiffX(I)
-%BACKWARDDIFFX  Computes backward difference in x-direction
-%   Bx(i,j) = I(i,j) - I(i,j-1), with the first column replicated.
-    [rows, cols] = size(I);
-    Bx = zeros(rows, cols);
-    % For each row, backward difference in x
-    Bx(:,2:cols) = I(:,2:cols) - I(:,1:cols-1);
-    % For the first column, replicate the next value (or set to zero)
-    Bx(:,1) = Bx(:,2);
+    [r,c] = size(I);
+    Bx = zeros(r,c);
+    Bx(:,2:c) = I(:,2:c) - I(:,1:c-1);
+    Bx(:,1)   = Bx(:,2);
 end
+
 
 function L = laplacianNeumann(U)
-%LAPLACIANNEUMANN Computes the 2D Laplacian of U using a 5-point stencil
-% with replicated boundaries to approximate Neumann boundary conditions.
-
-    [h, w] = size(U);
-
-    % Replicate boundaries
-    U_up    = [U(1,:);    U(1:h-1,:)];   
-    U_down  = [U(2:h,:); U(h,:)];     
-    U_left  = [U(:,1),   U(:,1:w-1)];    
-    U_right = [U(:,2:w), U(:,w)];
-
-    % size(U_up)
-
-    % Compute the Laplacian
-    L = (U_up + U_down + U_left + U_right) - 4 * U;
-    % size(L)
+    [r,c] = size(U);
+    Uup    = [U(1,:);    U(1:r-1,:)];
+    Udown  = [U(2:r,:);  U(r,:)];
+    Uleft  = [U(:,1),    U(:,1:c-1)];
+    Uright = [U(:,2:c),  U(:,c)];
+    L = (Uup + Udown + Uleft + Uright) - 4*U;
 end
 
-function E_val = computeColorEnergy(d, mismatchR,mismatchG, mismatchB, lambda)
+function E = computeInitEnergy(IL, IR, lambda)
+% COMPUTEENERGYCOLORPATCH   Evaluate
+%   E(d) = ∑_{x} [ λ/2 ∑_{c∈{R,G,B}} ∑_{(u,v)∈N(x)} (I_L^c(u,v) − I_R^c(u−d(x),v))^2 ]
+%        + (1−λ)/2 ∑_{x} ||∇d(x)||^2
+% where N(x) is the 3×3 patch around x, and we warp horizontally by d.
 
-    dataTerm = 0.5 * lambda * ...
-        ( sum(mismatchR(:).^2) + sum(mismatchG(:).^2) + sum(mismatchB(:).^2) );
+    kernel = ones(3,3);
 
-    [dx, dy] = gradient(d);
-    smoothTerm = 0.5 * (1 - lambda) * sum(dx(:).^2 + dy(:).^2);
+    % Compute per‐channel mismatch (masked)
+    mR = (IL(:,:,1) - IR(:,:,1));
+    mG = (IL(:,:,2) - IR(:,:,2));
+    mB = (IL(:,:,3) - IR(:,:,3));
 
-    E_val = dataTerm + smoothTerm;
+    % Sum of squared mismatches over 3×3 neighborhood
+    sR = conv2(mR.^2, kernel, 'same');
+    sG = conv2(mG.^2, kernel, 'same');
+    sB = conv2(mB.^2, kernel, 'same');
+
+    dataTerm = 0.5 * lambda * sum( sR(:) + sG(:) + sB(:) );
+
+    % % Smoothness term (Neumann laplacian)
+    % [dx, dy]   = gradient(d);
+    % smoothTerm = 0.5 * (1 - lambda) * sum( dx(:).^2 + dy(:).^2 );
+
+    E = dataTerm;
 end
+
